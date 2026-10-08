@@ -2,7 +2,7 @@
 // @name         [Dota2ProTracker] Hero ID Generator
 // @namespace    https://github.com/myouisaur/Dota2ProTracker
 // @icon         https://dota2protracker.com/static/favicon.ico
-// @version      1.2
+// @version      1.3
 // @description  Generates a copyable list of hero IDs based on the heroes currently shown in the table.
 // @author       Xiv
 // @match        *://*.dota2protracker.com/*
@@ -113,7 +113,7 @@
     'Gyrocopter': 72, 'Alchemist': 73, 'Invoker': 74, 'Silencer': 75, 'Outworld Devourer': 76,
     'Lycanthrope': 77, 'Brewmaster': 78, 'Shadow Demon': 79, 'Lone Druid': 80, 'Chaos Knight': 81,
     'Meepo': 82, 'Treant Protector': 83, 'Ogre Magi': 84, 'Undying': 85, 'Rubick': 86,
-    'Disruptor': 87, 'Nyx Assassin': 88, 'Naga Siren': 89, 'Keeper of the Light': 90, 'Wisp': 91,
+    'Disruptor': 87, 'Nyx Assassin': 88, 'Naga Siren': 89, 'Keeper of the Light': 90, 'Io': 91,
     'Visage': 92, 'Slark': 93, 'Medusa': 94, 'Troll Warlord': 95, 'Centaur Warrunner': 96,
     'Magnus': 97, 'Timbersaw': 98, 'Bristleback': 99, 'Tusk': 100, 'Skywrath Mage': 101,
     'Abaddon': 102, 'Elder Titan': 103, 'Legion Commander': 104, 'Techies': 105, 'Ember Spirit': 106,
