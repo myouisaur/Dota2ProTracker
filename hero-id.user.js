@@ -2,7 +2,7 @@
 // @name         [Dota2ProTracker] Hero ID Generator
 // @namespace    https://github.com/myouisaur/Dota2ProTracker
 // @icon         https://dota2protracker.com/static/favicon.ico
-// @version      1.3
+// @version      1.4
 // @description  Generates a copyable list of hero IDs based on the heroes currently shown in the table.
 // @author       Xiv
 // @match        *://*.dota2protracker.com/*
@@ -38,11 +38,27 @@
       HERO_LINK: 'a[href^="/hero/"]',
       TABLE_CONTAINER_PRIMARY: '.d2-table-scroll-area',
       TABLE_ROW_MARKER: '[data-d2-table-column-key]',
+      ROW: '[role="row"]',
+      COLUMN_HEADER: '[role="columnheader"]',
+    },
+
+    // Table Columns
+    COLUMNS: {
+      MATCHES_HEADER_LABEL: 'matches',
+      // Used only when the "Matches" header can't be found; the hero is
+      // column 0 and Matches is the column right after it.
+      MATCHES_FALLBACK_INDEX: 1,
+    },
+
+    // Limits
+    LIMITS: {
+      TOP_N_MAX: 999,
     },
 
     // Text
     TEXT: {
       MISSING_ID_SUFFIX: 'missing id>',
+      NO_MATCH_COUNT: 'n/a',
     },
 
     // CSS Classes
@@ -61,11 +77,13 @@
     // Storage Keys
     STORAGE: {
       HERO_MAP_OVERRIDES: 'xiv_hig_hero_map_overrides',
+      PREFS: 'xiv_hig_prefs',
     },
 
     // Timing
     TIMING: {
       MUTATION_DEBOUNCE_MS: 200,
+      INPUT_DEBOUNCE_MS: 250,
       TOAST_DURATION_MS: 2600,
       // Only active while the panel is open — checks whether SPA navigation
       // has swapped in a new table container so the observer can reattach.
@@ -132,6 +150,111 @@
     'Windrunner': 'Windranger',
     'Nevermore': 'Shadow Fiend',
     'Furion': "Nature's Prophet",
+  };
+
+  // ---------------------------------------------------------------------
+  // Utilities (pure helpers — no DOM or storage access)
+  // ---------------------------------------------------------------------
+  const Utils = {
+    debounce(fn, delayMs) {
+      let timeoutId = null;
+      return (...args) => {
+        if (timeoutId) clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => fn(...args), delayMs);
+      };
+    },
+
+    normalizeName(name) {
+      if (typeof name !== 'string') return '';
+      return name
+        .normalize('NFKD')
+        .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+        .replace(/[^a-z0-9']/gi, '')
+        .toLowerCase();
+    },
+
+    decodeHeroNameFromHref(href) {
+      try {
+        const path = href.replace(/^\/hero\//, '');
+        return decodeURIComponent(path).trim();
+      } catch (err) {
+        return href.replace(/^\/hero\//, '').trim();
+      }
+    },
+
+    // parseCount('\n  7021\n') -> 7021 · parseCount('1,234') -> 1234 · parseCount('') -> null
+    parseCount(text) {
+      const match = String(text || '').match(/\d[\d,]*/);
+      if (!match) return null;
+      const value = parseInt(match[0].replace(/,/g, ''), 10);
+      return Number.isFinite(value) ? value : null;
+    },
+
+    // Accepts anything a user might type; returns a whole number in range or null ("show all").
+    parseTopN(raw) {
+      const value = parseInt(String(raw).trim(), 10);
+      if (!Number.isFinite(value) || value < 1) return null;
+      return Math.min(value, CONFIG.LIMITS.TOP_N_MAX);
+    },
+
+    // Keeps the entries whose match count is within the top N, preserving the
+    // original (table) order. Heroes tied for the last spot are all kept so
+    // the cutoff never drops one arbitrarily.
+    // applyTopN([{matches:9},{matches:5},{matches:9},{matches:5}], 2) -> kept: first + third, tiedExtra: 0
+    // applyTopN([{matches:9},{matches:5},{matches:5}], 2)            -> kept: all three, tiedExtra: 1
+    applyTopN(entries, topN) {
+      const readableCounts = entries
+        .filter((entry) => entry.matches !== null)
+        .map((entry) => entry.matches)
+        .sort((a, b) => b - a);
+
+      if (readableCounts.length <= topN) return { kept: entries, tiedExtra: 0 };
+
+      const threshold = readableCounts[topN - 1];
+      const kept = entries.filter((entry) => entry.matches !== null && entry.matches >= threshold);
+      return { kept, tiedExtra: Math.max(0, kept.length - topN) };
+    },
+  };
+
+  // ---------------------------------------------------------------------
+  // Preferences Store — Top N filter and output options, saved as one object.
+  // ---------------------------------------------------------------------
+  const Prefs = {
+    values: { topN: null, includeMatches: false },
+
+    init() {
+      this.values = this.load();
+    },
+
+    sanitize(candidate) {
+      const source = candidate && typeof candidate === 'object' && !Array.isArray(candidate) ? candidate : {};
+      return {
+        topN: Utils.parseTopN(source.topN === null || source.topN === undefined ? '' : source.topN),
+        includeMatches: source.includeMatches === true,
+      };
+    },
+
+    load() {
+      try {
+        if (typeof GM_getValue !== 'function') return this.sanitize(null);
+        const raw = GM_getValue(CONFIG.STORAGE.PREFS, '{}');
+        return this.sanitize(JSON.parse(raw));
+      } catch (err) {
+        Logger.error('Prefs', 'Saved preferences were corrupted. Falling back to defaults.', err);
+        return this.sanitize(null);
+      }
+    },
+
+    update(partial) {
+      this.values = this.sanitize(Object.assign({}, this.values, partial));
+
+      try {
+        if (typeof GM_setValue !== 'function') return;
+        GM_setValue(CONFIG.STORAGE.PREFS, JSON.stringify(this.values));
+      } catch (err) {
+        Logger.error('Prefs', 'Could not save preferences. They will reset next visit.', err);
+      }
+    },
   };
 
   // ---------------------------------------------------------------------
@@ -207,37 +330,6 @@
   };
 
   // ---------------------------------------------------------------------
-  // Utilities
-  // ---------------------------------------------------------------------
-  const Utils = {
-    debounce(fn, delayMs) {
-      let timeoutId = null;
-      return (...args) => {
-        if (timeoutId) clearTimeout(timeoutId);
-        timeoutId = setTimeout(() => fn(...args), delayMs);
-      };
-    },
-
-    normalizeName(name) {
-      if (typeof name !== 'string') return '';
-      return name
-        .normalize('NFKD')
-        .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
-        .replace(/[^a-z0-9']/gi, '')
-        .toLowerCase();
-    },
-
-    decodeHeroNameFromHref(href) {
-      try {
-        const path = href.replace(/^\/hero\//, '');
-        return decodeURIComponent(path).trim();
-      } catch (err) {
-        return href.replace(/^\/hero\//, '').trim();
-      }
-    },
-  };
-
-  // ---------------------------------------------------------------------
   // DOM Locator (read-only — never mutates the site's own DOM tree)
   // ---------------------------------------------------------------------
   const DomLocator = {
@@ -281,18 +373,47 @@
       return true;
     },
 
-    // Extracts hero display names, in table order, deduplicated by href.
-    // Returns { names, containerFound } so callers can distinguish "no table
+    // Finds which column holds match counts by reading the header labels, so
+    // the lookup survives the site reordering columns. The header row may sit
+    // inside or just outside the scroll area, so both scopes are tried.
+    findMatchesColumnIndex(container) {
+      const scopes = [container, container.parentElement].filter(Boolean);
+
+      for (const scope of scopes) {
+        const headers = Array.from(scope.querySelectorAll(CONFIG.SELECTORS.COLUMN_HEADER));
+        const index = headers.findIndex((header) =>
+          (header.textContent || '').trim().toLowerCase().includes(CONFIG.COLUMNS.MATCHES_HEADER_LABEL)
+        );
+        if (index !== -1) return index;
+      }
+
+      Logger.log('DomLocator', 'Matches header not found; using fallback column position.');
+      return CONFIG.COLUMNS.MATCHES_FALLBACK_INDEX;
+    },
+
+    readMatchesForLink(link, columnIndex) {
+      const row = link.closest(CONFIG.SELECTORS.ROW);
+      if (!row) return null;
+
+      const cell = row.children[columnIndex];
+      if (!cell) return null;
+
+      return Utils.parseCount(cell.textContent);
+    },
+
+    // Extracts { name, matches } per hero, in table order, deduplicated by href.
+    // Returns { entries, containerFound } so callers can distinguish "no table
     // on this page" from "table present but every row is filtered out".
-    extractHeroNamesInOrder() {
+    extractHeroEntriesInOrder() {
       const container = this.findTableContainer();
       if (!container) {
-        return { names: [], containerFound: false };
+        return { entries: [], containerFound: false };
       }
 
       const links = this.findHeroLinks(container);
+      const matchesColumnIndex = this.findMatchesColumnIndex(container);
       const seenHrefs = new Set();
-      const names = [];
+      const entries = [];
 
       for (const link of links) {
         if (!this.isElementVisible(link)) continue;
@@ -302,10 +423,12 @@
         seenHrefs.add(href);
 
         const name = this.resolveHeroNameForLink(link, href);
-        if (name) names.push(name);
+        if (!name) continue;
+
+        entries.push({ name, matches: this.readMatchesForLink(link, matchesColumnIndex) });
       }
 
-      return { names, containerFound: true };
+      return { entries, containerFound: true };
     },
 
     resolveHeroNameForLink(link, href) {
@@ -329,27 +452,44 @@
   };
 
   // ---------------------------------------------------------------------
-  // Generator — turns hero names into the final output text.
+  // Generator — turns hero entries into the final output text.
   // ---------------------------------------------------------------------
   const Generator = {
     generate() {
-      const { names, containerFound } = DomLocator.extractHeroNamesInOrder();
+      const { entries, containerFound } = DomLocator.extractHeroEntriesInOrder();
 
       if (!containerFound) {
-        return { lines: [], isEmpty: true, emptyReason: 'no-table' };
+        return { lines: [], isEmpty: true, emptyReason: 'no-table', meta: null };
       }
 
-      if (names.length === 0) {
-        return { lines: [], isEmpty: true, emptyReason: 'no-matches' };
+      if (entries.length === 0) {
+        return { lines: [], isEmpty: true, emptyReason: 'no-matches', meta: null };
       }
+
+      const { topN, includeMatches } = Prefs.values;
+      const { kept, tiedExtra } = topN
+        ? Utils.applyTopN(entries, topN)
+        : { kept: entries, tiedExtra: 0 };
 
       const lookup = HeroMapStore.buildNormalizedLookup();
-      const lines = names.map((name) => {
-        const id = lookup.get(Utils.normalizeName(name));
-        return id !== undefined ? String(id) : `${name} - ${CONFIG.TEXT.MISSING_ID_SUFFIX}`;
-      });
+      const lines = kept.map((entry) => this.buildLine(entry, lookup, includeMatches));
+      const unreadableCount = entries.filter((entry) => entry.matches === null).length;
 
-      return { lines, isEmpty: false, emptyReason: null };
+      return {
+        lines,
+        isEmpty: false,
+        emptyReason: null,
+        meta: { topN, tiedExtra, unreadableCount, includeMatches },
+      };
+    },
+
+    buildLine(entry, lookup, includeMatches) {
+      const id = lookup.get(Utils.normalizeName(entry.name));
+      const idText = id !== undefined ? String(id) : `${entry.name} - ${CONFIG.TEXT.MISSING_ID_SUFFIX}`;
+      if (!includeMatches) return idText;
+
+      const matchesText = entry.matches !== null ? String(entry.matches) : CONFIG.TEXT.NO_MATCH_COUNT;
+      return `${idText}, ${matchesText}`;
     },
 
     formatOutputText(lines) {
@@ -494,6 +634,34 @@
           gap: 0.65rem;
           flex: 1;
         }
+
+        .xiv-hig-controls {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 0.5rem 1rem;
+          font-size: 0.8rem;
+          color: #cbd5e1;
+        }
+        .xiv-hig-field, .xiv-hig-check {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.4rem;
+          cursor: pointer;
+        }
+        .xiv-hig-input {
+          width: clamp(4rem, 14vw, 5rem);
+          padding: 0.35rem 0.5rem;
+          background: #060b10;
+          color: #e2e8f0;
+          border: 1px solid #1f3442;
+          border-radius: 0.4rem;
+          font-size: 0.8rem;
+        }
+        .xiv-hig-input:hover { border-color: #22d3ee55; }
+        .xiv-hig-input:focus-visible { outline: 2px solid #67e8f9; outline-offset: 1px; }
+        .xiv-hig-check input { accent-color: #0e7490; width: 1rem; height: 1rem; cursor: pointer; }
+        .xiv-hig-check input:focus-visible { outline: 2px solid #67e8f9; outline-offset: 2px; }
 
         .xiv-hig-textarea {
           width: 100%;
@@ -865,6 +1033,8 @@
     textareaEl: null,
     statusEl: null,
     fabEl: null,
+    topNInputEl: null,
+    includeMatchesEl: null,
     tableObserver: null,
     observedContainer: null,
     containerWatchdogId: null,
@@ -890,6 +1060,56 @@
     toggle() {
       if (this.isOpen) this.close();
       else this.open();
+    },
+
+    buildControls() {
+      const debouncedTopNChange = Utils.debounce(() => {
+        Prefs.update({ topN: this.topNInputEl.value });
+        this.refresh(false);
+      }, CONFIG.TIMING.INPUT_DEBOUNCE_MS);
+
+      this.topNInputEl = DOMBuilder.create('input', {
+        className: 'xiv-hig-input',
+        type: 'number',
+        min: '1',
+        max: String(CONFIG.LIMITS.TOP_N_MAX),
+        step: '1',
+        inputmode: 'numeric',
+        placeholder: 'All',
+        'aria-label': 'Only list the top number of heroes by match count. Leave blank for all heroes.',
+        onInput: debouncedTopNChange,
+      });
+
+      this.includeMatchesEl = DOMBuilder.create('input', {
+        type: 'checkbox',
+        'aria-label': 'Include each hero\'s match count in the list',
+        onChange: () => {
+          Prefs.update({ includeMatches: this.includeMatchesEl.checked });
+          this.refresh(false);
+        },
+      });
+
+      const topNField = DOMBuilder.create(
+        'label',
+        { className: 'xiv-hig-field', title: 'Show only the heroes with the most matches. Leave blank for all.' },
+        'Top',
+        this.topNInputEl,
+        'by matches'
+      );
+
+      const includeField = DOMBuilder.create(
+        'label',
+        { className: 'xiv-hig-check' },
+        this.includeMatchesEl,
+        'Include match count'
+      );
+
+      return DOMBuilder.create('div', { className: 'xiv-hig-controls' }, topNField, includeField);
+    },
+
+    syncControlsFromPrefs() {
+      this.topNInputEl.value = Prefs.values.topN === null ? '' : String(Prefs.values.topN);
+      this.includeMatchesEl.checked = Prefs.values.includeMatches;
     },
 
     ensurePanelBuilt() {
@@ -947,7 +1167,13 @@
         DOMBuilder.create('div', { className: 'xiv-hig-header-actions' }, refreshBtn, settingsBtn, closeBtn)
       );
 
-      const body = DOMBuilder.create('div', { className: 'xiv-hig-body' }, this.textareaEl, this.statusEl);
+      const body = DOMBuilder.create(
+        'div',
+        { className: 'xiv-hig-body' },
+        this.buildControls(),
+        this.textareaEl,
+        this.statusEl
+      );
 
       const copyBtn = DOMBuilder.create(
         'button',
@@ -971,6 +1197,7 @@
     // fully interactive (navigation, filtering, sorting) while it's open.
     open() {
       this.ensurePanelBuilt();
+      this.syncControlsFromPrefs();
       this.panelEl.classList.add(CONFIG.CSS_CLASSES.PANEL_OPEN);
       this.isOpen = true;
 
@@ -997,11 +1224,28 @@
       if (event.key === 'Escape') Panel.close();
     },
 
+    buildStatusText(lines, meta) {
+      const missingCount = lines.filter((line) => line.includes(CONFIG.TEXT.MISSING_ID_SUFFIX)).length;
+      const parts = [
+        missingCount > 0
+          ? `${lines.length} heroes • ${missingCount} missing`
+          : `${lines.length} heroes matched`,
+      ];
+
+      if (meta.topN) parts.push(`top ${meta.topN} by matches`);
+      if (meta.tiedExtra > 0) parts.push(`${meta.tiedExtra} extra from ties`);
+      if (meta.unreadableCount > 0 && (meta.topN || meta.includeMatches)) {
+        parts.push(`${meta.unreadableCount} without a match count`);
+      }
+
+      return parts.join(' • ');
+    },
+
     refresh(showToast) {
       if (!this.panelEl) return;
 
       try {
-        const { lines, isEmpty, emptyReason } = Generator.generate();
+        const { lines, isEmpty, emptyReason, meta } = Generator.generate();
 
         if (isEmpty) {
           this.textareaEl.value = '';
@@ -1014,11 +1258,7 @@
         this.removeEmptyState();
         this.textareaEl.style.display = '';
         this.textareaEl.value = Generator.formatOutputText(lines);
-
-        const missingCount = lines.filter((line) => line.includes(CONFIG.TEXT.MISSING_ID_SUFFIX)).length;
-        this.statusEl.textContent = missingCount > 0
-          ? `${lines.length} heroes • ${missingCount} missing`
-          : `${lines.length} heroes matched`;
+        this.statusEl.textContent = this.buildStatusText(lines, meta);
 
         if (showToast) Toast.show('List regenerated.', 'success');
       } catch (err) {
@@ -1119,6 +1359,7 @@
   // ---------------------------------------------------------------------
   try {
     HeroMapStore.init();
+    Prefs.init();
     Panel.init();
   } catch (err) {
     Logger.error('Bootstrap', 'Fatal error during initialization.', err);
